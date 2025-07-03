@@ -1,10 +1,13 @@
 import asyncio
+import json
 import os
 import sys
 from copy import deepcopy
-from typing import List
+from typing import List, Union
 
+from dotenv import load_dotenv
 from langchain_core.messages import (
+    AIMessage,
     AIMessageChunk,
     BaseMessage,
     HumanMessage,
@@ -12,15 +15,19 @@ from langchain_core.messages import (
 )
 
 from agent.graph import AgentGraph
+from db import clear_db, init_db, load_messages, save_message
+
+load_dotenv()
+init_db()
 
 
 class ChatCLI:
     def __init__(self):
         self.agent = None
-        self.messages: List[BaseMessage] = []
+        self.messages = self._load_messages()
 
     def _get_api_key(self) -> str:
-        api_key = os.getenv("ANTHROPIC_API_KEY")
+        api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             print("❌ ANTHROPIC_API_KEY 환경 변수가 설정되지 않았습니다.")
             print("다음 명령으로 API 키를 설정하세요:")
@@ -42,7 +49,10 @@ class ChatCLI:
         return user_input.lower().strip() == "clear"
 
     async def _stream_response(self, user_message: str):
-        self.messages.append(HumanMessage(content=user_message))
+        user_message = HumanMessage(content=user_message)
+        self.messages.append(user_message)
+        self._save_message(user_message)
+
         print("\n🤖 AgentFlow:")
 
         tool_call_map = {}
@@ -76,6 +86,8 @@ class ChatCLI:
                     for value in event.values():
                         if "messages" in value:
                             self.messages.extend(value["messages"])
+                            for message in value["messages"]:
+                                self._save_message(message)
                 else:
                     print(f"Unknown event type: {event_type}")
                     print("\n")
@@ -86,9 +98,39 @@ class ChatCLI:
             print(f"\n❌ 에러가 발생했습니다: {e}")
             print("다시 시도해주세요.")
 
+    def _save_message(self, message: Union[HumanMessage, AIMessage, ToolMessage]):
+        if isinstance(message, HumanMessage):
+            role = "user"
+        elif isinstance(message, AIMessage):
+            role = "assistant"
+        elif isinstance(message, ToolMessage):
+            role = "tool"
+
+        metadata = message.model_dump()
+
+        save_message(
+            id=message.id,
+            role=role,
+            content=message.content,
+            metadata=metadata,
+        )
+
+    def _load_messages(self) -> List[BaseMessage]:
+        messages = []
+        db_messages = load_messages()
+        for message in db_messages:
+            if message[1] == "user":
+                messages.append(HumanMessage(**json.loads(message[3])))
+            elif message[1] == "assistant":
+                messages.append(AIMessage(**json.loads(message[3])))
+            elif message[1] == "tool":
+                messages.append(ToolMessage(**json.loads(message[3])))
+
+        return messages
+
     async def run(self):
         api_key = self._get_api_key()
-        self.agent = AgentGraph(provider="anthropic", model="claude-3-5-sonnet-20241022", api_key=api_key)
+        self.agent = AgentGraph(provider="openai", model="gpt-4o-mini", api_key=api_key)
 
         self._print_welcome()
 
@@ -105,6 +147,7 @@ class ChatCLI:
 
                 if self._should_clear(user_input):
                     self.messages = []
+                    clear_db()
                     print("🧹 대화 기록이 지워졌습니다.")
                     continue
 
